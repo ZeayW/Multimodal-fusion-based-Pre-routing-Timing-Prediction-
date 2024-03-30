@@ -476,7 +476,7 @@ def main(options):
     print(cnn)
     print("----------------Loading data----------------")
     test_data_file = os.path.join(data_save_path, 'test.pkl')
-    test_dataset,case2design = load_data(data_save_path,'train',options.out_dim,options.os_rate,options.feat_reduce,options.norm)
+    test_dataset,case2design = load_data(data_save_path,'test',options.out_dim,options.os_rate,options.feat_reduce,options.norm)
     Loss = nn.CrossEntropyLoss() if options.task == 'cls' else nn.MSELoss() 
     beta = options.beta
     

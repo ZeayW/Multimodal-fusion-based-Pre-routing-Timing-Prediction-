@@ -5,6 +5,11 @@ from torch import nn
 from dgl import function as fn
 from dgl.nn.functional import edge_softmax
 
+
+def cell_msg_reduce(nodes):
+    return {'h_neigh1': th.max(nodes.mailbox['m'], dim=1)}
+
+
 class MLP(nn.Module):
     r"""
                 Description
@@ -18,7 +23,7 @@ class MLP(nn.Module):
         self.activation = activation
         self.dropout = nn.Dropout(p=dropout)
         hidden_dim = 256
-        #hidden_dim = max(128,2*in_dim)
+
         self.layers= nn.Sequential(
             nn.Linear(in_dim,hidden_dim,bias=bias),
             self.activation,
@@ -30,6 +35,7 @@ class MLP(nn.Module):
 
     def forward(self,embedding):
         return self.layers(embedding).squeeze(-1)
+
 
 class PathConv(nn.Module):
 
@@ -119,6 +125,13 @@ class PathConv(nn.Module):
         h = h_self + h_drive
         return {'h':h}
 
+    def cell_msg_reduce(self,nodes):
+        # print(th.max(nodes.mailbox['m'], dim=1).values)
+        # exit()
+        msg = nodes.mailbox['m']
+        weight = th.softmax(msg,dim=1)
+        return{'h_neigh1':(msg*weight).sum(1)}
+
     def apply_cell_func(self,nodes):
 
         """
@@ -136,14 +149,19 @@ class PathConv(nn.Module):
         # h_cell = f1(cell_feat)+f2(max(h_input))
         #print(nodes.data['cell_feat'])
         h_self = self.fc_cell_self(nodes.data['cell_feat'])
-        #print('h_self',h_self)
-        #print('h_neigh_cell', nodes.data['h_neigh1'])
         h_input = self.fc_cell_neigh(nodes.data['h_neigh1'])
         h = h_self + h_input
         #print('h',h)
         return {'h':h}
 
-    
+    def apply_cell_func_level0(self,nodes):
+        h_self = self.fc_cell_self(nodes.data['cell_feat'])
+        # print('h',h)
+        return {'h': h_self}
+
+    def copy_src(self,edges):
+        return {'m':edges.src['h']}
+
     def cal_edge_attn(self,edges):
         e = self.activation(
                 (edges.src['h'].view((-1,1,self.out_feats_dim))*self.attn).sum(dim=-1)
@@ -181,7 +199,7 @@ class PathConv(nn.Module):
         #graph.ndata['h'] = graph.ndata['h'].detach()
 
         if level_id%2==1:
-            graph.pull(cur_nodes, fn.copy_src('h', 'm'), fn.max('m','h_neigh1'),
+            graph.pull(cur_nodes, fn.copy_src('h', 'm'), fn.mean('m','h_neigh1'),
                        apply_node_func=self.apply_net_func,etype='net')
 
         else:
@@ -200,8 +218,24 @@ class PathConv(nn.Module):
                 graph.pull(cur_nodes, fn.u_mul_e('h', 'a', 'm'), fn.sum('m','h_neigh1'),
                        apply_node_func=self.apply_cell_func,etype='cell')
             else:
-                graph.pull(cur_nodes, fn.copy_src('h', 'm'), fn.max('m','h_neigh1'),
-                           apply_node_func=self.apply_cell_func,etype='cell')
+                # print(cur_nodes)
+                # print(level_id)
+                # print('#nodes',len(cur_nodes))
+                apply_node_func = self.apply_cell_func_level0 if level_id==0 else self.apply_cell_func
+                graph.pull(cur_nodes, fn.copy_src('h','m'), self.cell_msg_reduce,
+                            apply_node_func=apply_node_func, etype='cell')
+
+                # change the apply_func for PIs
+                # graph.pull(cur_nodes, fn.copy_src('h','m'), fn.max('m','h_neigh1'),
+                #             apply_node_func=apply_node_func, etype='cell')
+
+                #orignal one
+                # graph.pull(cur_nodes, fn.copy_src('h','m'), fn.max('m','h_neigh1'),
+                #             apply_node_func=self.apply_cell_func, etype='cell')
+
+
+
+
 
 
         #activation
