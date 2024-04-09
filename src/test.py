@@ -1,11 +1,5 @@
-import random
-from importlib.resources import path
-from lib2to3.pytree import Node
-from tracemalloc import start
-from dataset import *
 from options import get_options
 from model import *
-from TimeConv import *
 import dgl
 import pickle
 import numpy as np
@@ -16,6 +10,8 @@ import itertools
 from MyDataloader import *
 from torchmetrics import R2Score
 from train import norm, judge_critical
+import matplotlib.pyplot as plt
+
 
 device = th.device("cuda:"+str(get_options().gpu) if th.cuda.is_available() else "cpu")
 R2_score = R2Score().to(device)
@@ -173,6 +169,7 @@ def test(model_save_path,loader,device,model,cnn,Loss,beta,options,case2design):
             graph = graph.to(device)
             count_target = 0
             label_hats = None
+            levels = []
             target_list = []
             # first_level_nodes = topo_levels[0][0]
             # init_message = graph.ndata['h'][first_level_nodes]
@@ -190,6 +187,7 @@ def test(model_save_path,loader,device,model,cnn,Loss,beta,options,case2design):
                     sampled_paths[level].append(pathid)
                 
                 for level_id, level in enumerate(topo_levels):
+                    # if level_id==1: continue
                     nodes,eids = level[:2]
                     targets = sampled_ends.get(level_id,[])
                     paths = sampled_paths.get(level_id,[])
@@ -204,11 +202,20 @@ def test(model_save_path,loader,device,model,cnn,Loss,beta,options,case2design):
                         path_map = path_mask.to_dense()*feat_map
                         #path_map = path_map.view(-1,path_map.shape[1]*path_map.shape[2])
                 
-                    cur_label_hats = model(graph,nodes,eids,targets,level_id,path_map)
+                    cur_label_hats = model(graph,nodes,eids,targets,level_id,th.tensor(level_id,dtype=th.float).unsqueeze(0).to(device),path_map)
 
                     if len(paths) == 0:
                         continue
 
+                    levels.extend([level_id]*len(cur_label_hats))
+                    cur_arrival_time = graph.ndata['arrival_time'][targets].squeeze()
+                    if len(cur_label_hats)>=2:
+                        cur_r2 = R2_score(cur_label_hats, cur_arrival_time).to(device)
+                        cur_mape = th.abs((cur_label_hats-cur_arrival_time)/cur_arrival_time).mean()
+                        print(cur_label_hats,cur_arrival_time)
+                        print("level {}: #={}, r2={}, mape={}".format(level_id, len(cur_label_hats), cur_r2,cur_mape))
+
+                    # if level_id<5: cur_label_hats = graph.ndata['arrival_time'][targets].squeeze()
                     if label_hats is None:
                         label_hats = cur_label_hats
                     else:
@@ -217,6 +224,10 @@ def test(model_save_path,loader,device,model,cnn,Loss,beta,options,case2design):
             # labels: the ground-truth binary labels, decide whether path is critical or not
             # predict_labels: the predicted binary labels
             # label_hats: the output of the model, len=2 for classification, len=1 for regression
+
+            levels = np.array(levels)
+
+
             labels = graph.ndata['label'][target_list].squeeze()
             if options.task == 'cls':
                 predict_labels = th.argmax(nn.functional.softmax(label_hats, 1), dim=1)
@@ -228,8 +239,15 @@ def test(model_save_path,loader,device,model,cnn,Loss,beta,options,case2design):
                 test_loss = Loss(label_hats, arrival_time)
                 predict_labels = judge_critical(label_hats,required_time).to(device)
                 test_r2 = R2_score(label_hats,arrival_time).to(device)
-                total_r2 += test_r2.item() 
-            #print('R2 score: {}'.format(test_r2))
+                total_r2 += test_r2.item()
+
+                relative_error = (label_hats-arrival_time)/arrival_time
+                relative_error = relative_error.detach().cpu().numpy()
+                plt.scatter(levels, relative_error)
+                os.makedirs(os.path.join(options.model_saving_dir,'visual'),exist_ok=True)
+                plt.savefig(os.path.join(options.model_saving_dir,'visual','{}.png'.format(case_idx)))
+                plt.close()
+                #print('R2 score: {}'.format(test_r2))
             # calculate loss
             # positive_pids = th.tensor(target_paths)[predict_labels==1].numpy().tolist()
             # design = case2design[case_idx]

@@ -49,6 +49,7 @@ def get_options(args=None):
     parser.add_argument('--task',type=str,default='reg',help="decice a classification task or regression task, valid values: ['cls','reg']")
     parser.add_argument('--attn',action='store_true',help='decide whether to apply attention mechanism in GNN')
     parser.add_argument('--num_heads',type=int,default=1,help='Decide the number of heads for attention mechanism')
+
     options = parser.parse_args(args)
 
     

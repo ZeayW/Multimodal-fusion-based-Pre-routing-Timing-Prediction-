@@ -1,9 +1,3 @@
-'''
-@file tee.py
-@author algrebe@github, Zizheng Guo
-
-Fixed buffer I/O bug discussed in https://github.com/algrebe/python-tee/issues/7
-'''
 
 import os
 import sys

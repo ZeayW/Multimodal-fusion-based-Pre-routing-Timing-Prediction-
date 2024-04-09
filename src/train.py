@@ -7,10 +7,9 @@ from importlib.resources import path
 from lib2to3.pytree import Node
 from tkinter import N
 from tracemalloc import start
-from dataset import *
+import json
 from options import get_options
 from model import *
-from TimeConv import *
 from Unet import UNet
 import dgl
 import pickle
@@ -26,8 +25,6 @@ from torch.utils.data import DataLoader
 with open('../rawdata/ctype2id.json', 'r') as f:
     ctype2id = json.load(f)
     num_ctypes = len(ctype2id)
-
-idx2design = {}
 
 
 device = th.device("cuda:"+str(get_options().gpu) if th.cuda.is_available() else "cpu")
@@ -57,14 +54,14 @@ def init_model(options):
         gnn = None
     else:
         gnn = PathConv(
-            in_feats_dim = options.out_dim,
-            out_feats_dim=options.out_dim,
+            out_feat_dim=options.out_dim,
+            hidden_feat_dim=options.out_dim,
             cell_feat_dim = options.cell_feat_dim,
             net_feat_dim = options.net_feat_dim,
             flag_attn= options.attn,
             num_heads= options.num_heads
         )
-        mlp_dim += gnn.out_feats_dim
+        mlp_dim += gnn.out_feat_dim
     # initialize the cnn model
     if options.no_cnn:
         cnn = None
@@ -76,13 +73,8 @@ def init_model(options):
         nn.init.xavier_uniform_(fcn.weight, gain=gain)
         mlp_dim += options.cnn_outdim
     # initialze the MLP
-    mlp = MLP2(
-        in_dim = mlp_dim,
-        #in_dim = options.out_dim,
-        out_dim = options.nlabels,
-        nlayers = options.n_fcn,
-        dropout = options.mlp_dropout
-    )
+    mlp_dim += 64
+    mlp = MLP(mlp_dim,mlp_dim*2,options.nlabels)
 
    
     #fcn=None
@@ -142,7 +134,7 @@ def load_model(device,options):
 
 
 
-def validate(loader,device,model,cnn,beta,options):
+def validate(data_save_path,val_designs,device,model,cnn,beta,options):
     r"""
 
     validate the model
@@ -175,8 +167,10 @@ def validate(loader,device,model,cnn,beta,options):
         # The dst_nodes of the last block of in_block/out_block is the central nodes.
         print('validate:')
         case_idx = 0
-        for path_dataset,graph,path2level,path2endpoint,topo_levels,cnn_inputs,path_masks in loader:
-            
+        for i, design in enumerate(val_designs):
+            path_dataset, graph, path2level, path2endpoint, topo_levels, cnn_inputs, path_masks = load_single_design(
+                'test',data_save_path,design,options.out_dim,options.os_rate,options.feat_reduce,options.norm)
+
             total_num, total_loss, correct, fn, fp, tn, tp, total_r2 = 0, 0.0, 0,0, 0, 0, 0, 0
             runtime = 0
             # optim.zero_grad()
@@ -220,7 +214,7 @@ def validate(loader,device,model,cnn,beta,options):
                         path_map = path_mask.to_dense()*feat_map
                         #path_map = path_map.view(-1,path_map.shape[1]*path_map.shape[2])
                 
-                    cur_label_hats = model(graph,nodes,eids,targets,level_id,path_map)
+                    cur_label_hats = model(graph,nodes,eids,targets,level_id,th.tensor(level_id,dtype=th.float).unsqueeze(0).to(device),path_map)
 
                     if len(paths) == 0:
                         continue
@@ -365,94 +359,78 @@ def norm(feature,start_idx):
         feature[:,i:i+1] = minMax_scalar(feature[:,i]).reshape(-1,1)
     return feature
 
-    
-def load_data(data_path,usage,init_feat_dim,os_rate,feat_reduce,if_norm):
 
-    """
-
-    load the data
-
-    :param dataset_file: str
-            a pickle file that saves the dataset
-    :param init_feat_dim: int
-            the dimension of the initial feature
-    :return:
-        updated_dataset: List[(graph, topo_levels)]
-            where graph is the DAG representation of a circuit,
-            and topo_levels are the calculated topological levels
-    """
-    assert usage in ['train','test'], "Wrong data usage! Should be either 'train' or 'test'."
-    design_list_file = os.path.join(data_path,'{}data_list.txt'.format(usage))
+def get_design_list(data_path,usage):
+    assert usage in ['train', 'test'], "Wrong data usage! Should be either 'train' or 'test'."
+    design_list_file = os.path.join(data_path, '{}data_list.txt'.format(usage))
     assert os.path.exists(design_list_file), \
         "Can not find the traindata list txt '{}'".format(design_list_file)
 
-    with open(design_list_file,'r') as f:
+    with open(design_list_file, 'r') as f:
         lines = f.readlines()
-        design_list = [l.replace('\n','') for l in lines]
-    
-    print('--- {} designs: '.format(usage),design_list)
-    datasets = []
-    for i,design in enumerate(design_list):
-        dataset_file = os.path.join(data_path,'{}.pkl'.format(design))
-        graph,topo_levels,path_masks,path2level,path2endpoint,critical_paths,cnn_inputs = th.load(dataset_file)
-        #with open(dataset_file,'rb') as f:
-            #graph,topo_levels,path_masks,path2level,path2endpoint,critical_paths,cnn_inputs = pickle.load(f)
-        print(path_masks.shape,graph.ndata['cell_feat'].shape)
-        
-        graph.ndata['h'] = th.zeros((graph.number_of_nodes(), init_feat_dim), dtype=th.float)
-        graph.edges['cell'].data['a'] = th.zeros((graph.number_of_edges(etype='cell'), 1), dtype=th.float)
-        if feat_reduce is not None:
-            if feat_reduce[1] != 0: 
-                graph.ndata['net_feat'] = graph.ndata['net_feat'][:,:-feat_reduce[1]]
-            if feat_reduce[0]!=0:
-                graph.ndata['cell_feat'] = graph.ndata['cell_feat'][:,:-feat_reduce[0]]
-            #print(graph.ndata['cell_feat'][:5])
-        # normalize all the features, so that the value of different feature will not differ greatly
-        #graph.ndata['cell_feat'] = transform_cellfeat(graph.ndata['cell_feat'])
-        if if_norm:
-            graph.ndata['cell_feat'] = norm(graph.ndata['cell_feat'],num_ctypes)
-            graph.ndata['net_feat'] = norm(graph.ndata['net_feat'],num_ctypes)
-      
-        if type(cnn_inputs)== np.ndarray:
-            cnn_inputs = th.from_numpy(cnn_inputs).float()
-        #cnn_inputs = th.unsqueeze(cnn_inputs,dim=0)
-        paths = list(range(len(graph.ndata['end'][graph.ndata['end'].squeeze()==1])))
-        #non_critical_paths = list(set(paths)-set(critical_paths))
-        num_neg = len(paths)-len(critical_paths)
-        num_pos = len(critical_paths)
-        ratio = num_neg / num_pos - 1
+        design_list = [l.replace('\n', '') for l in lines]
+    print('--- {} designs: '.format(usage), design_list)
 
-        if usage == 'test':
 
-            split_file = os.path.join(data_path,'{}_split.pkl'.format(design))
-            if os.path.exists(split_file):
-                with open(split_file,'rb') as f:
-                    val_paths,test_paths = pickle.load(f)
-                
-            else:
-                val_paths,test_paths = split_dataset(paths,critical_paths)
-                with open(split_file,'wb') as f:
-                    pickle.dump((val_paths,test_paths),f)
-            paths = val_paths
-            print(len(paths),len(critical_paths))
-        
-        if usage=='train' and os_rate!=0 and ratio>1:
-            idx2design[i] = design
-            #shuffle(critical_paths)
-            for _ in range(os_rate):
-                paths.extend(critical_paths)
-            # while ratio>=1:
-            #     paths.extend(critical_paths)
-            #     ratio -= 1
-            # shuffle(critical_paths)
-            # paths.extend(critical_paths[:int(ratio*num_pos)])
-        path_dataset = PathDataset(paths)
-        
-        datasets.append(
-            (path_dataset,graph,path2level,path2endpoint,topo_levels,cnn_inputs,path_masks)
-        )
-    
-    return datasets
+    return design_list
+
+def load_single_design(usage,data_path,design,init_feat_dim,os_rate,feat_reduce,if_norm):
+    dataset_file = os.path.join(data_path, '{}.pkl'.format(design))
+    graph, topo_levels, path_masks, path2level, path2endpoint, critical_paths, cnn_inputs = th.load(dataset_file)
+    # with open(dataset_file,'rb') as f:
+    # graph,topo_levels,path_masks,path2level,path2endpoint,critical_paths,cnn_inputs = pickle.load(f)
+    # print(path_masks.shape, graph.ndata['cell_feat'].shape)
+
+    graph.ndata['h'] = th.zeros((graph.number_of_nodes(), init_feat_dim), dtype=th.float)
+    graph.edges['cell'].data['a'] = th.zeros((graph.number_of_edges(etype='cell'), 1), dtype=th.float)
+    if feat_reduce is not None:
+        if feat_reduce[1] != 0:
+            graph.ndata['net_feat'] = graph.ndata['net_feat'][:, :-feat_reduce[1]]
+        if feat_reduce[0] != 0:
+            graph.ndata['cell_feat'] = graph.ndata['cell_feat'][:, :-feat_reduce[0]]
+        # print(graph.ndata['cell_feat'][:5])
+    # normalize all the features, so that the value of different feature will not differ greatly
+    # graph.ndata['cell_feat'] = transform_cellfeat(graph.ndata['cell_feat'])
+    if if_norm:
+        graph.ndata['cell_feat'] = norm(graph.ndata['cell_feat'], num_ctypes)
+        graph.ndata['net_feat'] = norm(graph.ndata['net_feat'], num_ctypes)
+
+    if type(cnn_inputs) == np.ndarray:
+        cnn_inputs = th.from_numpy(cnn_inputs).float()
+    # cnn_inputs = th.unsqueeze(cnn_inputs,dim=0)
+    paths = list(range(len(graph.ndata['end'][graph.ndata['end'].squeeze() == 1])))
+    # non_critical_paths = list(set(paths)-set(critical_paths))
+    num_neg = len(paths) - len(critical_paths)
+    num_pos = len(critical_paths)
+    ratio = num_neg / num_pos - 1
+
+    if usage == 'test':
+
+        split_file = os.path.join(data_path, '{}_split.pkl'.format(design))
+        if os.path.exists(split_file):
+            with open(split_file, 'rb') as f:
+                val_paths, test_paths = pickle.load(f)
+
+        else:
+            val_paths, test_paths = split_dataset(paths, critical_paths)
+            with open(split_file, 'wb') as f:
+                pickle.dump((val_paths, test_paths), f)
+        paths = val_paths
+        # print(len(paths), len(critical_paths))
+
+    if usage == 'train' and os_rate != 0 and ratio > 1:
+        # shuffle(critical_paths)
+        for _ in range(os_rate):
+            paths.extend(critical_paths)
+        # while ratio>=1:
+        #     paths.extend(critical_paths)
+        #     ratio -= 1
+        # shuffle(critical_paths)
+        # paths.extend(critical_paths[:int(ratio*num_pos)])
+    path_dataset = PathDataset(paths)
+
+    return path_dataset, graph, path2level, path2endpoint, topo_levels, cnn_inputs, path_masks
+
 
 def judge_critical(pred_arr_time,required_time):
     pred_slack = required_time - pred_arr_time
@@ -485,10 +463,9 @@ def train(options,seed):
 
     print("----------------Loading data----------------")
     #train_data_file = os.path.join(data_save_path, 'train.pkl')
-    
-    train_dataset = load_data(data_save_path,'train',options.out_dim,options.os_rate,options.feat_reduce,options.norm)
-    #val_data_file = os.path.join(data_save_path, 'test.pkl')
-    val_dataset = load_data(data_save_path,'test',options.out_dim,options.os_rate,options.feat_reduce,options.norm)
+
+    train_designs = get_design_list(data_save_path,'train')
+    val_designs = get_design_list(data_save_path,'test')
 
     # split the validation set and test set
 
@@ -525,10 +502,12 @@ def train(options,seed):
         #total_nodes = []
         
         #shuffle(train_dataset)
-        for i,(path_dataset,graph,path2level,path2endpoint,topo_levels,cnn_inputs,path_masks) in enumerate(train_dataset): 
+        for i, design in enumerate(train_designs):
+            path_dataset, graph, path2level, path2endpoint, topo_levels, cnn_inputs, path_masks = load_single_design(
+                'train',data_save_path,design,options.out_dim,options.os_rate,options.feat_reduce,options.norm)
         #for i,(path_dataset,graph,path2level,path2endpoint,topo_levels,cnn_inputs,path_masks) in enumerate(random.sample(train_dataset,len(train_dataset))):
             #feat_map = th.ones((128,128)).to(device)
-            design = idx2design[i]
+
             feat_map = cnn(cnn_inputs.to(device)).reshape((1,-1)) if cnn is not None else None
             #feat_map = feat_map.to_sparse()
             #path_masks = path_masks.to_sparse()
@@ -588,7 +567,7 @@ def train(options,seed):
                     #print(path_map.shape)
                     #path_map = None
                     #print(level_id,path_map.shape)
-                    cur_label_hats = model(graph,nodes,eids, targets,level_id,path_map)
+                    cur_label_hats = model(graph,nodes,eids, targets,level_id,th.tensor(level_id,dtype=th.float).unsqueeze(0).to(device),path_map)
 
                     if len(paths) == 0:
                         continue
@@ -665,7 +644,7 @@ def train(options,seed):
                 else:
                     flag = bidx%5 == 0
                 if flag or bidx==num_batch-1:
-                    val_res,val_F1_score,val_r2 = validate(val_dataset, device, model,cnn,beta,options)
+                    val_res,val_F1_score,val_r2 = validate(data_save_path,val_designs, device, model,cnn,beta,options)
                     if options.task == 'cls':
                         judgement = val_F1_score > max_F1_score 
                     elif options.task == 'reg':
