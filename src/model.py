@@ -1,20 +1,20 @@
 import torch as th
 from torch import nn
 from dgl import function as fn
-
+import torch.nn.functional as F
 
 def cell_msg_reduce(nodes):
     return {'h_neigh1': th.max(nodes.mailbox['m'], dim=1)}
 
 
 class MLP(th.nn.Module):
-    def __init__(self, *sizes, batchnorm=False, dropout=False):
+    def __init__(self, *sizes, batchnorm=False, dropout=False,negative_slope=0):
         super().__init__()
         fcs = []
         for i in range(1, len(sizes)):
             fcs.append(th.nn.Linear(sizes[i - 1], sizes[i]))
             if i < len(sizes) - 1:
-                fcs.append(th.nn.LeakyReLU(negative_slope=0.0))
+                fcs.append(th.nn.LeakyReLU(negative_slope=negative_slope))
                 # fcs.append(torch.nn.ReLU())
                 if dropout: fcs.append(th.nn.Dropout(p=0.2))
                 if batchnorm: fcs.append(th.nn.BatchNorm1d(sizes[i]))
@@ -45,58 +45,45 @@ class PathConv(nn.Module):
         self.net_feat_dim = net_feat_dim
         self.num_heads = num_heads
 
-        # self.mlp_cell_feat = MLP(cell_feat_dim, hidden_feat_dim , hidden_feat_dim, hidden_feat_dim)
-        # self.mlp_net_feat = MLP(net_feat_dim, hidden_feat_dim,hidden_feat_dim, hidden_feat_dim)
-        # self.mlp_cell_combine = MLP(out_feat_dim + hidden_feat_dim, (out_feat_dim+hidden_feat_dim), self.out_feat_dim)
-        # self.mlp_net_combine = MLP(out_feat_dim + hidden_feat_dim, (out_feat_dim + hidden_feat_dim),self.out_feat_dim)
-        # self.mlp_pi = MLP(cell_feat_dim, cell_feat_dim, self.out_feat_dim)
-
         self.fc_cell_neigh = MLP(self.hidden_feat_dim, 256,self.out_feat_dim)
+
         self.fc_cell_self = MLP(self.cell_feat_dim, 256,self.out_feat_dim)
         self.fc_net_self = MLP(self.net_feat_dim, 256,self.out_feat_dim)
+        self.fc_net_drive = MLP(2,self.out_feat_dim)
 
-        # net_indim = self.net_feat_dim + self.out_feat_dim
-        # self.mlp_net = MLP(net_indim, net_indim * 2, self.out_feat_dim)
-        # cell_indim = self.cell_feat_dim + self.out_feat_dim
-        # self.mlp_cell = MLP(cell_indim, cell_indim * 2, self.out_feat_dim)
-        # self.mlp_pi = MLP(self.cell_feat_dim, self.cell_feat_dim * 2, self.out_feat_dim)
-        # self.fc_cell_neigh = MLP(self.in_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_cell_self = MLP(self.cell_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_net_self = MLP(self.net_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_cell_neigh = nn.Linear(self.in_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_cell_self = nn.Linear(self.cell_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_net_neigh = nn.Linear(self.in_feat_dim, self.out_feat_dim, bias=bias)
-        # self.fc_net_self = nn.Linear(self.net_feat_dim, self.out_feat_dim, bias=bias)
+        self.fc_attn2 = nn.Linear(self.out_feat_dim, 1, bias=False)
 
-        negative_slope = 0.2
-        if self.flag_attn:
-            self.attn = nn.Parameter(th.FloatTensor(size=(1, num_heads, self.out_feat_dim)))
-        # self.leaky_relu = nn.LeakyReLU(negative_slope)
+        if flag_attn:
+            dim_key = 256
+            self.fc_key = nn.Linear(1, dim_key, bias=False)
+            self.fc_attn = nn.Linear(2*dim_key, 1, bias=False)
 
         # set some attributes
         self.activation = activation
         self.norm = norm
-        # initialize the parameters
-        self.reset_parameters()
 
-    def reset_parameters(self):
-        r"""
 
-        Description
-        -----------
-        Reinitialize learnable parameters.
+    def apply_netdrive_func(self, nodes):
 
-        Note
-        ----
-        The linear weights :math:`W^{(l)}` are initialized using Glorot uniform initialization.
         """
-        gain = nn.init.calculate_gain('relu')
-        # nn.init.xavier_uniform_(self.fc_net_neigh.weight, gain=gain)
-        # nn.init.xavier_uniform_(self.fc_net_self.weight, gain=gain)
-        # nn.init.xavier_uniform_(self.fc_cell_neigh.weight, gain=gain)
-        # nn.init.xavier_uniform_(self.fc_cell_self.weight, gain=gain)
-        if self.flag_attn:
-            nn.init.xavier_normal_(self.attn, gain=gain)
+
+        An apply function to further update the node features of output pins
+        after the message reduction.
+
+        :param nodes: the applied nodes
+        :return:
+            {'msg_name':msg}
+                msg: torch.Tensor
+                    The aggregated messages of shape :math:`(N, D_{out})` where : N is number of nodes, math:`D_{out}`
+                    is size of messages.
+        """
+        #
+        # h= self.fc_net_drive(nodes.data['h_drive'])
+        h = nodes.data['h_drive']
+        return {'h_drive': h}
+
+    def message_func_net(self, edges):
+        return {'m': edges.src['h'], 'm_d': edges.src['h_drive']}
 
     def apply_net_func(self, nodes):
 
@@ -113,63 +100,60 @@ class PathConv(nn.Module):
                     is size of messages.
         """
         #
-        h_self = self.fc_net_self(nodes.data['net_feat'])
+        m_self = nodes.data['net_feat']
+        h_self = self.fc_net_self(m_self)
+        # h_self = self.fc_net_self(nodes.data['net_feat'])
         h_drive = nodes.data['h_neigh1']
+
         h = h_self + h_drive
-        #
-        # h_self = self.mlp_net_feat(nodes.data['net_feat'])
-        # h = th.cat([h_self, nodes.data['h_neigh1']], dim=1)
-        # h = self.mlp_net_combine(h)
 
 
         return {'h': h}
 
     def cell_msg_reduce(self, nodes):
-        # print(th.max(nodes.mailbox['m'], dim=1).values)
-        # exit()
         msg = nodes.mailbox['m']
         weight = th.softmax(msg, dim=1)
         return {'h_neigh1': (msg * weight).sum(1)}
 
+    def cell_msg_reduce_attn2(self, nodes):
+        msg = nodes.mailbox['m']
+        key = self.fc_attn2(msg)
+        weight = th.softmax(key, dim=0)
+        # print(key,weight)
+        return {'h_neigh1': (msg * weight).sum(1)}
+
+    def cell_msg_reduce_attn(self, nodes):
+        alpha = F.softmax(nodes.mailbox['e'], dim=1)
+        h = th.sum(alpha * nodes.mailbox['m'], dim=1)
+
+        return {'h_neigh1': h}
+
+
+    def message_func_attn(self,edges):
+        z = th.cat([self.fc_key(edges.src['key']), self.fc_key(edges.dst['key'])], dim=1)
+        #z = self.fc_key(edges.src['key'])
+        a = self.fc_attn(z)
+        return {'m':edges.src['h'],'e':F.leaky_relu(a)}
+
     def apply_cell_func(self, nodes):
 
-        """
-
-        An apply function to further update the node features of output pins
-        after the message reduction.
-
-        :param nodes: the applied nodes
-        :return:
-            {'msg_name':msg}
-               msg: torch.Tensor
-                   The aggregated messages of shape :math:`(N, D_{out})` where : N is number of nodes, math:`D_{out}`
-                   is size of messages.
-        """
-
-        h_self = self.fc_cell_self(nodes.data['cell_feat'])
+        cell_feat = nodes.data['cell_feat']
+        h_self = self.fc_cell_self(cell_feat)
         h_input = self.fc_cell_neigh(nodes.data['h_neigh1'])
         h = h_self + h_input
 
-        # h_self = self.mlp_cell_feat(nodes.data['cell_feat'])
-        # h = th.cat([h_self, nodes.data['h_neigh1']], dim=1)
-        # h = self.mlp_cell_combine(h)
 
         return {'h': h}
 
     def apply_cell_func_level0(self, nodes):
-        h = self.fc_cell_self(nodes.data['cell_feat'])
 
-        # h = self.mlp_pi(nodes.data['cell_feat'])
+        cell_feat = nodes.data['cell_feat']
+        h = self.fc_cell_self(cell_feat)
+
         return {'h': h}
 
-    def copy_src(self, edges):
-        return {'m': edges.src['h']}
 
-    def cal_edge_attn(self, edges):
-        e = self.activation(
-            (edges.src['h'].view((-1, 1, self.out_feat_dim)) * self.attn).sum(dim=-1)
-        )
-        return {'e': e}
+
 
     def forward(self, graph, cur_nodes, eids, targets, level_id):
         r"""
@@ -199,24 +183,19 @@ class PathConv(nn.Module):
         # so that when the level id is even, the type is cell, else net
 
         if level_id % 2 == 1:
-            graph.pull(cur_nodes, fn.copy_src('h', 'm'), fn.mean('m', 'h_neigh1'),
+            graph.pull(cur_nodes,fn.copy_src('h','m'), fn.mean('m', 'h_neigh1'),
                        apply_node_func=self.apply_net_func, etype='net')
 
         else:
-            if self.flag_attn and level_id != 0:
+            if self.flag_attn:
                 # calculate edge attention
-                graph.apply_edges(func=self.cal_edge_attn, edges=eids, etype='cell')
-                # apply edge softmax
-                # our version is based on sparse matrix softmax
-                e = graph.edges['cell'].data['e'][eids]
-                target_edges = (graph.edges(etype='cell')[0][eids], graph.edges(etype='cell')[1][eids])
-                i = th.stack(target_edges, 0)
-                sp = th.sparse.FloatTensor(i, e)
-                a = th.sparse.softmax(sp, 0).coalesce().values().view((-1, 1))
-                graph.edges['cell'].data['a'][eids] = a
-                # message passing
-                graph.pull(cur_nodes, fn.u_mul_e('h', 'a', 'm'), fn.sum('m', 'h_neigh1'),
-                           apply_node_func=self.apply_cell_func, etype='cell')
+                apply_node_func = self.apply_cell_func_level0 if level_id == 0 else self.apply_cell_func
+                # apply_node_func = self.apply_cell_func
+                reduce_func = fn.max('m', 'h_neigh1') if level_id == 0 else self.cell_msg_reduce_attn
+                graph.pull(cur_nodes, self.message_func_attn, reduce_func=reduce_func,
+                           apply_node_func=apply_node_func, etype='cell')
+                graph.pull(cur_nodes, fn.copy_src('net_feat', 'm2'), reduce_func=fn.mean('m2', 'h_drive'),
+                           apply_node_func=self.apply_netdrive_func, etype='net')
             else:
                 apply_node_func = self.apply_cell_func_level0 if level_id == 0 else self.apply_cell_func
                 #apply_node_func = self.apply_cell_func
@@ -224,116 +203,21 @@ class PathConv(nn.Module):
                 graph.pull(cur_nodes, fn.copy_src('h', 'm'), reduce_func=reduce_func,
                            apply_node_func=apply_node_func, etype='cell')
 
-                # change the apply_func for PIs
-                # graph.pull(cur_nodes, fn.copy_src('h','m'), fn.max('m','h_neigh1'),
-                #             apply_node_func=apply_node_func, etype='cell')
-
-                # orignal one
-                # graph.pull(cur_nodes, fn.copy_src('h','m'), fn.max('m','h_neigh1'),
-                #             apply_node_func=self.apply_cell_func, etype='cell')
-
         # activation
-        # print(graph.nodes['pin'].data['h'][cur_nodes])
         if self.activation is not None:
             graph.nodes['pin'].data['h'][cur_nodes] = self.activation(graph.nodes['pin'].data['h'][cur_nodes])
         # normalization
         if self.norm is not None:
             graph.nodes['pin'].data['h'][cur_nodes] = self.norm(graph.nodes['pin'].data['h'][cur_nodes])
-        #
-        # if level_id==0:
-        #     print(graph.nodes['pin'].data['h'][cur_nodes])
-        # print(graph.nodes['pin'].data['h'][cur_nodes])
+
         return graph.nodes['pin'].data['h'][targets]
 
-
-class LayoutNet3(nn.Module):
-    def __init__(self,pooling):
-        super(LayoutNet3, self).__init__()
-        if pooling == 'max':
-            pooling_layer = nn.MaxPool2d(2, 2, 0, 1)
-            pooling_layer2 = nn.MaxPool2d(2, 2, 0, 1)
-        elif pooling == 'avg':
-            pooling_layer = nn.AvgPool2d(2,2,0)
-            pooling_layer2 = nn.AvgPool2d(2,2,0)
-        else:
-            assert False, 'wrong pooling type for layoutnet!'
-
-        self.encode = nn.Sequential(
-            nn.Conv2d(3, 32, 9, 1, 4),
-            nn.ReLU(),
-            pooling_layer,
-            nn.Conv2d(32, 64, 7, 1, 3),
-            nn.ReLU(),
-            pooling_layer,
-            nn.Conv2d(64, 128, 9, 1, 4),
-            nn.ReLU(),
-            #nn.Conv2d(32, 1, 7, 1, 3),
-            )
-        
-        self.decode = nn.Sequential(
-            nn.Conv2d(128, 256, 7, 1, 3),
-            nn.ReLU(),
-            nn.ConvTranspose2d(256, 128, 9, 2, 4, 1),
-            nn.Conv2d(128, 64, 5, 1, 2),
-            nn.ReLU(),
-            nn.ConvTranspose2d(64, 32, 5, 2, 2, 1),
-            nn.Conv2d(32, 1, 3, 1, 1),
-            pooling_layer2,
-            nn.ReLU()
-        )
-
- 
-    def forward(self, x):
-        encode_out = self.encode(x)      
-        out = self.decode(encode_out)
-        return out
-
-class LayoutNet2(nn.Module):
-    def __init__(self,pooling):
-        super(LayoutNet2, self).__init__()
-        if pooling == 'max':
-            pooling_layer = nn.MaxPool2d(2, 2, 0, 1)
-            pooling_layer2 = nn.MaxPool2d(4, 4, 0, 1)
-        elif pooling == 'avg':
-            pooling_layer = nn.AvgPool2d(2,2,0)
-            pooling_layer2 = nn.AvgPool2d(4,4,0)
-        else:
-            assert False, 'wrong pooling type for layoutnet!'
-
-        self.encode = nn.Sequential(
-            nn.Conv2d(3, 32, 9, 1, 4),
-            nn.ReLU(),
-            pooling_layer,
-            nn.Conv2d(32, 64, 7, 1, 3),
-            nn.ReLU(),
-            pooling_layer,
-            nn.Conv2d(64, 32, 9, 1, 4),
-            nn.ReLU(),
-            #nn.Conv2d(32, 1, 7, 1, 3),
-            )
-        
-        self.decode = nn.Sequential(
-            nn.Conv2d(32, 32, 7, 1, 3),
-            nn.ReLU(),
-            nn.ConvTranspose2d(32, 16, 9, 2, 4, 1),
-            nn.Conv2d(16, 16, 5, 1, 2),
-            nn.ReLU(),
-            nn.ConvTranspose2d(16, 4, 5, 2, 2, 1),
-            nn.Conv2d(4, 1, 3, 1, 1),
-            pooling_layer2,
-            nn.ReLU()
-        )
-        
-
- 
-    def forward(self, x):
-        encode_out = self.encode(x)      
-        out = self.decode(encode_out)
-        return out
         
 class LayoutNet(nn.Module):
     def __init__(self,pooling):
         super(LayoutNet, self).__init__()
+        activation = nn.ReLU()
+        activation2 = nn.LeakyReLU(negative_slope=0.1)
         if pooling == 'max':
             pooling_layer = nn.MaxPool2d(2, 2, 0, 1)
         elif pooling == 'avg':
@@ -341,24 +225,22 @@ class LayoutNet(nn.Module):
         else:
             assert False, 'wrong pooling type for layoutnet!'
         self.encode = nn.Sequential(
-            nn.Conv2d(3, 32, 9, 1, 4),
-            #nn.ReLU(),
+            nn.Conv2d(2, 32, 9, 1, 4),
+            activation,
             pooling_layer,
-            nn.ReLU(),
+            # nn.ReLU(),
             nn.Conv2d(32, 64, 7, 1, 3),
-            #nn.ReLU(),
+            activation,
             pooling_layer,
-            nn.ReLU(),
+            # nn.ReLU(),
             nn.Conv2d(64, 32, 9, 1, 4),
-            nn.ReLU(),
+            activation,
+            # nn.ConvTranspose2d(32, 16, 9, 2, 4, 1),
+            # nn.Conv2d(16, 16, 5, 1, 2),
+            # nn.ReLU(),
             nn.Conv2d(32, 1, 7, 1, 3),
-            nn.ReLU())
-
-        # gain = nn.init.calculate_gain('relu')
-        # nn.init.xavier_uniform_(self.encode[0].weight, gain=gain)
-        # nn.init.xavier_uniform_(self.encode[3].weight, gain=gain)
-        # nn.init.xavier_uniform_(self.encode[6].weight, gain=gain)
-        # nn.init.xavier_uniform_(self.encode[8].weight, gain=gain)
+            activation2
+        )
 
     def forward(self, x):
         out = self.encode(x)
@@ -372,38 +254,41 @@ class PathModel(nn.Module):
                     consits of two GNN models and one MLP model
         """
     def __init__(
-        self, gnn,fcn,mlp
+        self, gnn,cnn,fcn,mlp_impact,mlp_weight,mlp_fuse,global_dim=32
     ):
         super(PathModel, self).__init__()
-        
-        self.gnn = nn.Sequential(gnn)
-        self.fcn = nn.Sequential(fcn)
-        self.mlp = nn.Sequential(mlp)
-        self.mlp_alpha = MLP(1,128,64)
+        self.global_dim=global_dim
+        self.gnn = gnn
+        self.cnn = cnn
+        self.mlp_impact = mlp_impact
+        self.mlp_weight = mlp_weight
+        self.fcn = fcn
+        self.mlp_fuse = mlp_fuse
+        self.mlp_alpha = MLP(1,global_dim*2,global_dim)
 
     def forward(self, graph,nodes,eids,target_list,level_id,level_id_th,path_map):
-        factor = 1
-        # factor = th.sigmoid(level_id_th)
-        h_cnn = factor*self.fcn[0](path_map) \
-                  if self.fcn[0] is not None and len(target_list)!=0 \
-                  else None
 
-        h_gnn = self.gnn[0](graph,nodes,eids,target_list,level_id) \
-                   if self.gnn[0] is not None \
+        if self.fcn is not None and len(target_list) != 0:
+            h_cnn =  self.fcn(path_map)
+        else:
+            h_cnn = None
+
+        h_gnn = self.gnn(graph,nodes,eids,target_list,level_id) \
+                   if self.gnn is not None \
                    else None
 
-        h_global = self.mlp_alpha(level_id_th).expand(len(target_list),64)
+        h_global = self.mlp_alpha(level_id_th).expand(len(target_list),32)
+
         if len(target_list)==0:
-            return None
+           return None
 
         if h_cnn is None:
-            h =h_gnn
+            h = th.cat([h_gnn,h_global],dim=1)
         elif h_gnn is None:
-            h = h_cnn
+            h = th.cat([h_cnn,h_global],dim=1)
         else:
             h = th.cat((h_gnn,h_cnn,h_global),1)
 
-        return self.mlp[0](h).squeeze(-1)
+        return self.mlp_fuse(h).squeeze(-1)
 
         return h
-

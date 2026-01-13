@@ -272,16 +272,7 @@ def validate(data_save_path,val_designs,device,model,cnn,beta,options):
             overall_f1 += F1_score
             overall_acc += acc
             overall_precision += precision
-            
-            # overall_correct += correct
-            # overall_fn  += fn
-            # overall_fp += fp
-            # overall_tn += tn
-            # overall_tp += tp
-            # overall_num += total_num
-            # print('case',case_idx)
-            # case_idx += 1
-            # print("\ttp:", tp, " fp:", fp, " fn:", fn, " tn:", tn, " precision:", round(precision, 3))
+
             print("\tcase {} \tl:{:.3f}, r2:{:.3f}, rc:{:.3f}, F1:{:.3f}".format(case_idx,test_loss, test_r2,recall, F1_score))
             case_idx +=1
             res.append([test_loss,test_r2,acc,recall,precision,F1_score])
@@ -295,8 +286,6 @@ def validate(data_save_path,val_designs,device,model,cnn,beta,options):
     overall_precision = overall_precision / num_case
     # calculate overall recall, precision and F1-score
 
-    #print('overall val')
-    #print("\ttp:", overall_tp, " fp:", overall_fp, " fn:", overall_fn, " tn:", overall_tn, " precision:", round(overall_precision, 3))
     print("\toverall r2:{:.3f}, rc:{:.3f}, F1:{:.3f}".format(overall_r2, overall_recall, overall_f1))
     
     return res,overall_f1,overall_r2
@@ -315,38 +304,7 @@ def split_dataset(paths,critical_paths):
     return val_paths,test_paths
 
 
-def transform_cellfeat(cell_feat):
-    
-    new_cellfeat = th.zeros((cell_feat.shape[0],cell_feat.shape[1]-num_ctypes+4))
-    cell_type = cell_feat[:,:num_ctypes]
-    cell_type = th.argmax(cell_type,dim=1,keepdim=True)
-    id2celltype = {}
-    for cell,id in ctype2id.items():
-        id2celltype[id] = cell
 
-    # new celltype feat:
-    #   buf: 1000
-    #   inv: 0100
-    #   register: 0010
-    #   others: 0001
-    {"AND": 0, "FA": 1, "HA": 2, "MAJI": 3, "MAJ": 4, "NAND": 5, "NOR": 6, "OR": 7, "TIEHI": 8,
-     "TIELO": 9, "XNOR": 10, "XOR": 11, "ASYNC_DFFH": 12, "DFFHQN": 13, "DFFHQ": 14, "DFFLQN": 15,
-      "DFFLQ": 16, "DHL": 17, "DLL": 18, "ICG": 19, "SDFH": 20, "SDFL": 21, "BUF": 22, "CKINVDC": 23, 
-      "HB": 24, "INV": 25, "O2A1O1I": 26, "OA": 27, "OAI": 28, "A2O1A1I": 29, "A2O1A1O1I": 30, "AO": 31, "AOI": 32}
-    for i in range(cell_feat.shape[0]):
-        type = id2celltype[cell_type[i].item()]
-        new_cellfeat[i][0] = type == 'BUFF'
-        new_cellfeat[i][1] = type in ('INV', 'CKINVDC')
-        new_cellfeat[i][2] = type in ('TIEHI',"TIELO","ASYNC_DFFH","DFFHQN","DFFHQ",
-                                        "DFFLQN","DFFLQ","DHL","DLL","ICG","SDFH",
-                                        "SDFL","HB")
-        new_cellfeat[i][3] = not (new_cellfeat[i][0] and new_cellfeat[i][1] and new_cellfeat[i][2])
-        new_cellfeat[i][4:] = cell_feat[i][num_ctypes:]
-        print(type,new_cellfeat[i])
-    # new_cellfeat[:,0:1] = cell_type == ctype2id['BUF']
-    # new_cellfeat[:,1:2] = cell_type == ctype2id['INV']
-    # new_cellfeat[:,2:3] = ( cell_type != ctype2id['INV'] and cell_type!=ctype2id['BUF'])
-    # new_cellfeat[:,3:] = cell_feat[:,num_ctypes:]
 
 def minMax_scalar(a):
     min_a = th.min(a)
@@ -388,9 +346,7 @@ def load_single_design(usage,data_path,design,init_feat_dim,os_rate,feat_reduce,
             graph.ndata['net_feat'] = graph.ndata['net_feat'][:, :-feat_reduce[1]]
         if feat_reduce[0] != 0:
             graph.ndata['cell_feat'] = graph.ndata['cell_feat'][:, :-feat_reduce[0]]
-        # print(graph.ndata['cell_feat'][:5])
-    # normalize all the features, so that the value of different feature will not differ greatly
-    # graph.ndata['cell_feat'] = transform_cellfeat(graph.ndata['cell_feat'])
+
     if if_norm:
         graph.ndata['cell_feat'] = norm(graph.ndata['cell_feat'], num_ctypes)
         graph.ndata['net_feat'] = norm(graph.ndata['net_feat'], num_ctypes)
@@ -505,16 +461,9 @@ def train(options,seed):
         for i, design in enumerate(train_designs):
             path_dataset, graph, path2level, path2endpoint, topo_levels, cnn_inputs, path_masks = load_single_design(
                 'train',data_save_path,design,options.out_dim,options.os_rate,options.feat_reduce,options.norm)
-        #for i,(path_dataset,graph,path2level,path2endpoint,topo_levels,cnn_inputs,path_masks) in enumerate(random.sample(train_dataset,len(train_dataset))):
-            #feat_map = th.ones((128,128)).to(device)
 
             feat_map = cnn(cnn_inputs.to(device)).reshape((1,-1)) if cnn is not None else None
-            #feat_map = feat_map.to_sparse()
-            #path_masks = path_masks.to_sparse()
-            #print(feat_map.shape)
-            #optim.zero_grad()
-            # transfer the data to GPU
-            #graph = graph.to(device)
+
             graph = graph.to(device)
             #print(graph)
             if len(path2level)<= options.batch_size:
@@ -522,22 +471,13 @@ def train(options,seed):
             else:
                 path_loader = DataLoader(path_dataset,batch_size=options.batch_size,shuffle=True,drop_last=True)
 
-            # first_level_nodes = topo_levels[0][0]
-            # init_message = graph.ndata['h'][first_level_nodes]
             num_batch = len(path_loader)
             for bidx,path_ids in enumerate(path_loader):
-
                 path_ids = list(path_ids.numpy().tolist())
-                #endpoints = [path2endpoint[pid] for pid in path_ids]
-                #endpoints = endpoints.numpy().tolist()
-                # path_ids2 = [endpoints2path[nd] for nd in endpoints]
-                # assert set(path_ids) == set(path_ids2)
-
                 sampled_ends, sampled_paths = {}, {}
                 for i , pathid in enumerate(path_ids):
                     level = path2level[pathid]
                     endpoint = path2endpoint[pathid]
-                    #assert endpoints2path[endpoint] == pathid
                     sampled_ends[level] = sampled_ends.get(level,[])
                     sampled_ends[level].append(endpoint)
                     sampled_paths[level] = sampled_paths.get(level,[])
@@ -552,21 +492,14 @@ def train(options,seed):
                     if len(level)==2: eids = eids.to(device)
                     targets = sampled_ends.get(level_id,[])
                     paths = sampled_paths.get(level_id,[])
-                    
-                    #print(level_id,len(targets))
                     target_list.extend(targets)
                     count_target += len(target_list)
-                    #print(level_id,len(nodes))
                     if options.no_cnn or len(paths) == 0:
                         path_map = None                   
                     else:
-                        #path_mask = path_masks[paths].to(device)
                         path_mask = th.index_select(path_masks,0,th.tensor(paths)).to(device)
                         path_map = path_mask.to_dense()*feat_map
-                        #path_map = path_map.view(-1,path_map.shape[1]*path_map.shape[2])
-                    #print(path_map.shape)
-                    #path_map = None
-                    #print(level_id,path_map.shape)
+
                     cur_label_hats = model(graph,nodes,eids, targets,level_id,th.tensor(level_id,dtype=th.float).unsqueeze(0).to(device),path_map)
 
                     if len(paths) == 0:
@@ -576,11 +509,9 @@ def train(options,seed):
                         label_hats = cur_label_hats
                     else:
                         label_hats = th.cat((label_hats,cur_label_hats),dim=0)
-                #print(len(target_list),target_list[:10])
-                
+
                 labels = graph.ndata['label'][target_list].squeeze()
-                # predicted labels
-                #label_hats = mlp(target_embeddings)
+
                 if options.task == 'cls':
                     predict_labels = th.argmax(nn.functional.softmax(label_hats, 1), dim=1)
                     train_loss = Loss(label_hats, labels)
@@ -595,8 +526,7 @@ def train(options,seed):
                 # calculate loss
                 total_num = len(labels)
                 total_loss = train_loss.item() * len(labels)
-                #print('loss: {}, R2 score: {}'.format(train_loss.item(),train_r2))
-                
+
                 # calculate accuracy
                 correct = (
                         predict_labels == labels
@@ -633,16 +563,7 @@ def train(options,seed):
                 #if feat_map is not None: feat_map = feat_map.reshape((1,feat_map[0]*feat_map[1]))
                 end = time()
                 print("e{},{},b{}/{}, l:{:.3f}, r2:{:.3f}, r:{:.3f}, F1:{:.3f}".format(epoch,design,bidx,num_batch, train_loss.item(),train_r2.item(),recall,F1_score))
-                if epoch<10:
-                    flag = bidx%50 ==0
-                elif epoch<30:
-                    flag = bidx%15 ==0
-                elif epoch<50:
-                    flag = bidx%10 ==0
-                elif epoch < 100:
-                    flag = bidx%15 == 0
-                else:
-                    flag = bidx%5 == 0
+                flag = bidx % 50 == 0
                 if flag or bidx==num_batch-1:
                     val_res,val_F1_score,val_r2 = validate(data_save_path,val_designs, device, model,cnn,beta,options)
                     if options.task == 'cls':
@@ -664,65 +585,7 @@ def train(options,seed):
                             pickle.dump((parameters, model,cnn), f)
                         print("Model successfully saved")
         
-        # end = time()
-        # runtime += end-start
-        # Train_loss = total_loss / total_num
-        # Train_r2 = total_r2 / total_num
-        # # calculate accuracy, recall, precision and F1-score
-        # Train_acc = correct / total_num
-        # Train_recall = 0
-        # Train_precision = 0
-        # if tp != 0:
-        #     Train_recall = tp / (tp + fn)
-        #     Train_precision = tp / (tp + fp)
-        # Train_F1_score = 0
-        # if Train_precision != 0 or Train_recall != 0:
-        #     Train_F1_score = 2 * Train_recall * Train_precision / (Train_recall + Train_precision)
 
-        # print("Task: {}, epoch[{:d}]".format('classification' if options.task=='cls' else 'regression', epoch))
-        # print("training runtime: ",runtime)
-        # print("  train:")
-        # # print("\ttp:", tp, " fp:", fp, " fn:", fn, " tn:", tn, " precision:", round(Train_precision,3))
-        # print("loss:{:.8f}, r2:{:.3f}, acc:{:.3f}, recall:{:.3f}, F1 score:{:.3f}".format(Train_loss,Train_r2,Train_acc,Train_recall,Train_F1_score))
-
-        # validate
-        # print("  validate:")
-        # val_res,val_F1_score,val_r2 = validate(val_dataset, device, model,cnn,beta,options)
-        # # print("  test:")
-        # # validate(testdataloader, label_name, device, model,
-        # #          Loss, beta, options)
-
-        # # save the result of current epoch
-        # with open(os.path.join(options.model_saving_dir, 'res.txt'), 'a') as f:
-        #     f.write(str(round(Train_loss, 8)) + " " + str(round(Train_r2, 3)) + " " + str(round(Train_acc, 3)) + " " + str(
-        #         round(Train_recall, 3)) + " " + str(round(Train_precision,3))+" " + str(round(Train_F1_score, 3)) + "\n")
-        #     for res in val_res:
-        #         f.write("{:.3f} {:.3f} {:.3f} {:.3f} {:.3f} {:.3f}".format(res[0], res[1],res[2], res[3], res[4], res[5]) + "\n")
-        #     f.write('\n')
-
-        # if options.task == 'cls':
-        #     judgement = val_F1_score > max_F1_score 
-        # elif options.task == 'reg':
-        #     judgement = val_r2 > max_r2
-        # else:
-        #     assert False
-        # #judgement = True
-        # if judgement:
-        #    stop_score = 0
-        #    max_F1_score = val_F1_score
-        #    max_r2 = val_r2
-        #    print("Saving model.... ", os.path.join(options.model_saving_dir))
-        #    if os.path.exists(options.model_saving_dir) is False:
-        #       os.makedirs(options.model_saving_dir)
-        #    with open(os.path.join(options.model_saving_dir, 'model.pkl'), 'wb') as f:
-        #       parameters = options
-        #       pickle.dump((parameters, model,cnn), f)
-        #    print("Model successfully saved")
-        # else:
-        #     stop_score += 1
-        #     if stop_score >= 5:
-        #         print('Early Stop!')
-        #         exit(0)
 
 
 
